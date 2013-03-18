@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.rmi.RemoteException;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Map;
 import java.util.Properties;
 import java.util.regex.Pattern;
 
@@ -15,6 +16,9 @@ import javax.xml.rpc.ServiceException;
 
 import com.dolby.jira.net.soap.jira.JiraSoapService;
 import com.dolby.jira.net.soap.jira.JiraSoapServiceServiceLocator;
+import com.dolby.jira.net.soap.jira.RemoteIssue;
+import com.dolby.jira.net.soap.jira.RemotePermissionException;
+import com.dolby.jira.net.soap.jira.RemoteValidationException;
 import com.dolby.jira.net.soap.jira.RemoteWorklog;
 import com.google.api.client.auth.oauth2.Credential;
 import com.google.api.client.extensions.java6.auth.oauth2.AuthorizationCodeInstalledApp;
@@ -126,25 +130,52 @@ public class Main {
 								remoteWorklog.setTimeSpent(((eventEndMillis - eventStartMillis) / 60000) + "m");
 								remoteWorklog.setComment(event.getDescription());
 								
-								RemoteWorklog remoteWorklog2 = service.addWorklogAndAutoAdjustRemainingEstimate(token, issueKey, remoteWorklog);
+								final RemoteWorklog sentWorklog = service.addWorklogAndAutoAdjustRemainingEstimate(token, issueKey, remoteWorklog);
 								
-								final ExtendedProperties extendedProperties = new Event.ExtendedProperties();
-								HashMap<String, String> privateProperties = new HashMap<String, String>();
-								privateProperties.put("issueKey", issueKey);
-								privateProperties.put("worklogId", remoteWorklog2.getId());
-								extendedProperties.setPrivate(privateProperties);
-								event.setExtendedProperties(extendedProperties);
+								addExtendedProperties(event, issueKey, sentWorklog);
 								
 								event.setSummary("* " + summary);
+
 								client.events().update(calendar.getId(), event.getId(), event).execute();
 							} else {
-								final ExtendedProperties extendedProperties = event.getExtendedProperties();
-								if (extendedProperties != null && extendedProperties.getPrivate() != null && extendedProperties.getPrivate().containsKey("worklogId")) {
-									System.out.println(extendedProperties.getPrivate().get("worklogId"));
-								}
+								updateWorklogIfChanged(token, event);
 							}
 						}
 					}
+				}
+			}
+		}
+	}
+
+	private static void addExtendedProperties(Event event, String issueKey, RemoteWorklog sentWorklog) {
+		Map<String, String> prop = new HashMap<String, String>();
+		prop.put("issueKey", issueKey);
+		prop.put("worklogId", sentWorklog.getId());
+		
+		ExtendedProperties extendedProperties = new ExtendedProperties();
+		extendedProperties.setPrivate(prop);
+		event.setExtendedProperties(extendedProperties);		
+	}
+
+	private static void updateWorklogIfChanged(String token, Event event) throws RemotePermissionException, RemoteValidationException, com.dolby.jira.net.soap.jira.RemoteException, RemoteException {
+		if (event.getExtendedProperties() != null) {
+			RemoteIssue issue = service.getIssue(token, event.getExtendedProperties().getPrivate().get("issueKey"));
+			
+			for (RemoteWorklog worklog : service.getWorklogs(token, issue.getKey())) {
+				if (!worklog.getId().equals(event.getExtendedProperties().getPrivate().get("worklogId"))) continue;
+			
+				final long eventStartMillis = event.getStart().getDateTime().getValue();
+				final long eventEndMillis = event.getEnd().getDateTime().getValue();
+			
+				java.util.Calendar startDate = java.util.Calendar.getInstance();
+				startDate.setTimeInMillis(eventStartMillis);
+				
+				if (startDate.getTimeInMillis() != worklog.getStartDate().getTimeInMillis() || worklog.getTimeSpentInSeconds() != (eventEndMillis - eventStartMillis)/1000) {
+					final RemoteWorklog updatedWorklog = new RemoteWorklog();
+					updatedWorklog.setId(worklog.getId());
+					updatedWorklog.setStartDate(startDate);
+					updatedWorklog.setTimeSpent(((eventEndMillis - eventStartMillis) / 60000) + "m");
+					service.updateWorklogAndAutoAdjustRemainingEstimate(token, updatedWorklog);
 				}
 			}
 		}
